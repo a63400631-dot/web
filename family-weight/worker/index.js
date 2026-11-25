@@ -4,7 +4,7 @@ import icon from "../src/icon.svg";
 import { change } from "../lib/model";
 
 const cookieName = "__Host-family-weight";
-const lifetime = 30 * 24 * 60 * 60;
+const lifetime = 365 * 24 * 60 * 60;
 const utf8 = new TextEncoder();
 const asHex = buffer => Array.from(new Uint8Array(buffer), b => b.toString(16).padStart(2, "0")).join("");
 const hash = async text => asHex(await crypto.subtle.digest("SHA-256", utf8.encode(text)));
@@ -23,11 +23,18 @@ function matches(a, b) {
 
 function time() { return Math.floor(Date.now() / 1000); }
 
+const inviteDigests = env => (env.INVITE_DIGESTS ?? "").split(",");
+const sessionProof = (env, token) => signature(env.SESSION_SECRET, "invite-v1:" + token + (token.includes(".owner.") ? ":" + (env.OWNER_CODE_DIGEST ?? "") : ""));
+
 async function signedIn(request, env) {
-  if (!env.FAMILY_PASSWORD || !env.SESSION_SECRET) return false;
-  const raw = request.headers.get("cookie")?.match(/(?:^|;\s*)__Host-family-weight=(\d{10}\.[0-9a-f-]{36})\.([0-9a-f]{64})(?:;|$)/);
-  return !!raw && Number(raw[1].slice(0, 10)) > time() &&
-    matches(raw[2], await signature(env.SESSION_SECRET, raw[1] + ":" + env.FAMILY_PASSWORD));
+  if (!env.SESSION_SECRET) return false;
+  const raw = request.headers.get("cookie")?.match(/(?:^|;\s*)__Host-family-weight=(\d{10}\.(?:owner|family)\.[0-9a-f-]{36})\.([0-9a-f]{64})(?:;|$)/);
+  if (!raw || !matches(raw[2], await sessionProof(env, raw[1]))) return false;
+  const [expires, kind, id] = raw[1].split(".");
+  if (Number(expires) <= time()) return false;
+  if (kind === "owner") return true;
+  const row = await env.DB.prepare("SELECT digest FROM redeemed_invites WHERE session_id = ?").bind(id).first();
+  return !!row && inviteDigests(env).some(digest => matches(digest, row.digest));
 }
 
 const headers = { "Cache-Control": "no-store", "X-Content-Type-Options": "nosniff", "X-Robots-Tag": "noindex, nofollow", "Referrer-Policy": "no-referrer" };
@@ -36,9 +43,9 @@ const sessionCookie = (value, age) => cookieName + "=" + value + "; Path=/; Secu
 
 async function sessions(request, env) {
   if (request.method === "DELETE") return json({ ok: true }, 200, { "Set-Cookie": sessionCookie("", 0) });
-  if (!env.FAMILY_PASSWORD || !env.SESSION_SECRET) return json({ error: "家庭访问尚未配置。" }, 503);
-  const { password } = await request.json().catch(() => ({})) ?? {};
-  if (typeof password !== "string" || !password || password.length > 256) return json({ error: "请输入家庭密码。" }, 400);
+  if (!env.SESSION_SECRET) return json({ error: "家庭访问尚未配置。" }, 503);
+  const { code, owner } = await request.json().catch(() => ({})) ?? {};
+  if (typeof code !== "string" || !code.trim() || code.length > 80) return json({ error: "请输入访问码。" }, 400);
   const bucket = await signature(env.SESSION_SECRET, request.headers.get("CF-Connecting-IP") ?? "default");
   const now = time();
   const row = await env.DB.prepare(`
@@ -48,10 +55,21 @@ async function sessions(request, env) {
     RETURNING attempts
   `).bind(bucket, now, now - 900, now - 900).first();
   if (row.attempts > 10) return json({ error: "尝试次数过多，请 15 分钟后再试。" }, 429);
-  if (!matches(await hash(password), await hash(env.FAMILY_PASSWORD))) return json({ error: "家庭密码不正确。" }, 401);
-  const token = (now + lifetime) + "." + crypto.randomUUID();
-  const proof = await signature(env.SESSION_SECRET, token + ":" + env.FAMILY_PASSWORD);
-  return json({ ok: true }, 200, { "Set-Cookie": sessionCookie(token + "." + proof, lifetime) });
+  const digest = await hash(code.trim().toUpperCase());
+  const id = crypto.randomUUID();
+  if (owner === true) {
+    if (!env.OWNER_CODE_DIGEST || !matches(digest, env.OWNER_CODE_DIGEST)) return json({ error: "主人访问码不正确。" }, 401);
+  } else {
+    if (!(now < Number(env.INVITE_EXPIRES_AT ?? 0)) || !inviteDigests(env).some(key => matches(key, digest))) {
+      return json({ error: "邀请码无效或已过期。" }, 401);
+    }
+    const used = await env.DB.prepare(
+      "INSERT INTO redeemed_invites (digest, session_id, redeemed_at) VALUES (?, ?, ?) ON CONFLICT(digest) DO NOTHING RETURNING session_id"
+    ).bind(digest, id, now).first();
+    if (!used) return json({ error: "此邀请码已经使用。请在首次激活的浏览器中打开网站。" }, 409);
+  }
+  const token = (now + lifetime) + "." + (owner === true ? "owner" : "family") + "." + id;
+  return json({ ok: true }, 200, { "Set-Cookie": sessionCookie(token + "." + await sessionProof(env, token), lifetime) });
 }
 
 async function write(db, input) {
@@ -91,7 +109,7 @@ export default {
       if (request.method !== "GET" && request.headers.get("origin") !== url.origin) return json({ error: "请求来源无效。" }, 403);
       if (url.pathname === "/api/session" && ["POST", "DELETE"].includes(request.method)) return await sessions(request, env);
       if (url.pathname !== "/api/data") return json({ error: "请求无效。" }, 405);
-      if (!await signedIn(request, env)) return json({ error: "请重新输入家庭密码。" }, 401);
+      if (!await signedIn(request, env)) return json({ error: "请先激活家庭访问。" }, 401);
       if (request.method === "GET") {
         const [members, records] = await env.DB.batch([
           env.DB.prepare("SELECT id, name, initial, target, deadline FROM members ORDER BY rowid"),

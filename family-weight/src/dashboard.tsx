@@ -29,26 +29,28 @@ function Brand() {
 }
 
 export function Login() {
-  const [password, setPassword] = useState("");
+  const owner = new URLSearchParams(window.location.search).has("owner");
+  const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   async function unlock(event: FormEvent) {
     event.preventDefault();
     setBusy(true); setError("");
     try {
-      await call("session", "POST", { password });
-      window.location.reload();
+      await call("session", "POST", { code, owner });
+      window.location.replace("/");
     } catch (e) {
       setError(e instanceof Error ? e.message : "暂时无法登录。");
       setBusy(false);
     }
   }
+  const label = owner ? "主人访问码" : "家庭邀请码";
   return <main className="login-page"><div className="card login-card">
-    <Brand /><div className="login-lock"><LockKeyhole size={26} /></div><h1>进入家庭空间</h1>
-    <p>输入家庭密码，查看和记录体重。</p>
+    <Brand /><div className="login-lock"><LockKeyhole size={26} /></div><h1>{owner ? "主人登录" : "加入家庭空间"}</h1>
+    <p>{owner ? "输入你的主人访问码。" : "输入家人为你准备的一次性邀请码。激活后请继续使用当前浏览器。"}</p>
     <form onSubmit={unlock} className="stack">
-      <label className="field">家庭密码<input type="password" name="password" autoComplete="current-password" autoFocus required maxLength={256} value={password} onChange={e => setPassword(e.target.value)} /></label>
-      <button className="primary wide" disabled={busy}>{busy ? "正在验证…" : "进入"}</button>
+      <label className="field">{label}<input type="password" name="code" autoComplete="off" spellCheck={false} required maxLength={80} value={code} onChange={e => setCode(e.target.value)} /></label>
+      <button className="primary wide" disabled={busy}>{busy ? "正在验证…" : owner ? "登录" : "激活访问"}</button>
       {error && <p className="error" role="alert">{error}</p>}
     </form>
   </div></main>;
@@ -288,7 +290,7 @@ export function Dashboard({ demo }: { demo: boolean }) {
               <button disabled={settingsBusy} className="icon-button danger" aria-label={"删除 " + m.name} onClick={() => void remove(m)}><Trash2 size={17} /></button></div>)}</div>
         </section>
         <section className="card"><div className="card-heading"><h2><span className="section-icon mint"><LockKeyhole size={18} /></span>家庭访问</h2></div>
-          <p>知道家庭密码的人可以查看和编辑所有成员的记录。</p>
+          <p>已激活的家人可以查看和编辑所有成员的记录。退出后，家人需要新邀请码才能再次激活。</p>
           {demo ? <p className="caption">当前是本地演示，重启服务后恢复示例数据。</p> : <button className="secondary" disabled={settingsBusy} onClick={() => void logout()}><LogOut size={17} />退出家庭空间</button>}
         </section>
       </div>}
